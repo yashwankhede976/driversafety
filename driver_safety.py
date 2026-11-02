@@ -35,6 +35,15 @@ BEEP_DURATION   = 400   # ms per beep
 BEEP_PAUSE      = 100   # ms between beeps
 MIN_EYE_AREA    = 300   # px² – ignore tiny false detections
 
+# Eye-openness check: the Haar eye cascade also fires on CLOSED eyes
+# (it locates the eye *region*, not an open eye). To tell open vs. closed
+# we inspect the pixels inside each detected eye region. An open eye shows
+# a dark iris/pupil against brighter sclera/skin → a small, distinctly dark
+# blob and high local contrast. A closed eye is a comparatively uniform,
+# skin-toned patch with no such dark blob.
+EYE_DARK_RATIO_MIN = 0.045  # min fraction of very-dark pixels for "open"
+EYE_STDDEV_MIN     = 22.0   # min intensity std-dev (contrast) for "open"
+
 # ─────────────────────────────────────────────────────────────
 #  Load Haar cascades bundled with OpenCV
 # ─────────────────────────────────────────────────────────────
@@ -97,6 +106,38 @@ def detect_eyes(face_gray):
     if len(eyes) == 0:
         return []
     return [e for e in eyes if e[2] * e[3] >= MIN_EYE_AREA]
+
+
+# ─────────────────────────────────────────────────────────────
+#  Is a detected eye region actually OPEN?
+#  The eye cascade fires on closed eyes too, so presence alone is
+#  not enough. We analyse the pixels inside the region: an open eye
+#  has a dark iris/pupil (dark blob) and high contrast against the
+#  brighter sclera/skin; a closed eye is a flatter, uniform patch.
+# ─────────────────────────────────────────────────────────────
+def is_eye_open(eye_patch):
+    if eye_patch is None or eye_patch.size == 0:
+        return False
+
+    # Normalise lighting so the thresholds behave across brightness levels.
+    patch = cv2.equalizeHist(eye_patch)
+
+    # Focus on the central band of the region, where the iris/pupil sits,
+    # to avoid eyebrow / shadow pixels near the edges biasing the result.
+    h, w = patch.shape[:2]
+    y0, y1 = int(h * 0.20), int(h * 0.80)
+    x0, x1 = int(w * 0.15), int(w * 0.85)
+    center = patch[y0:y1, x0:x1]
+    if center.size == 0:
+        center = patch
+
+    # Contrast: an open eye has bright sclera next to a dark iris/pupil.
+    stddev = float(center.std())
+
+    # Dark-blob fraction: proportion of near-black pixels (iris/pupil).
+    dark_ratio = float((center < 45).sum()) / float(center.size)
+
+    return stddev >= EYE_STDDEV_MIN and dark_ratio >= EYE_DARK_RATIO_MIN
 
 
 # ─────────────────────────────────────────────────────────────
@@ -205,12 +246,16 @@ def main():
             eye_color = frame[fy : fy + fh // 2, fx : fx + fw]
 
             eyes = detect_eyes(eye_gray)
-            if len(eyes) >= 1:
-                eyes_detected = True
-                for (ex, ey, ew, eh) in eyes:
-                    cv2.circle(eye_color,
-                               (ex + ew // 2, ey + eh // 2),
-                               ew // 2, (0, 255, 100), 2)
+            for (ex, ey, ew, eh) in eyes:
+                patch   = eye_gray[ey : ey + eh, ex : ex + ew]
+                is_open = is_eye_open(patch)
+                if is_open:
+                    eyes_detected = True
+                # Green circle = open eye, red = region detected but closed.
+                color = (0, 255, 100) if is_open else (0, 0, 255)
+                cv2.circle(eye_color,
+                           (ex + ew // 2, ey + eh // 2),
+                           ew // 2, color, 2)
 
         # ── State machine ─────────────────────────────────────
         now = time.time()
